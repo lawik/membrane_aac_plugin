@@ -40,32 +40,51 @@ defmodule Membrane.AAC.Parser.Esds do
     <<section_no, type_tag::binary, byte_size(payload), payload::binary>>
   end
 
-  @spec parse_esds(binary()) :: AAC.t()
+  @doc """
+  Parses the `esds` atom, returning an error if it is malformed or describes a
+  stream that is not supported.
+  """
+  @spec parse_esds(binary()) :: {:ok, AAC.t()} | {:error, reason :: term()}
   def parse_esds(esds) do
-    {section_3, <<>>} = unpack_esds_section(esds, 3)
+    with {:ok, section_3, <<>>} <- unpack_esds_section(esds, 3),
+         {:ok, rest} <- parse_es_descriptor_header(section_3),
+         {:ok, section_4, esds_section_6} <- unpack_esds_section(rest, 4),
+         {:ok, <<2>>, <<>>} <- unpack_esds_section(esds_section_6, 6),
+         {:ok, esds_section_5} <- parse_decoder_config_descriptor(section_4),
+         {:ok, section_5, <<>>} <- unpack_esds_section(esds_section_5, 5),
+         {:ok, stream_format} <- AudioSpecificConfig.parse_audio_specific_config(section_5) do
+      {:ok, Map.put(stream_format, :config, {:esds, esds})}
+    else
+      {:error, _reason} = error -> error
+      _unexpected_section -> {:error, :invalid_esds}
+    end
+  end
 
-    <<_elementary_stream_id::16, flags::binary-size(1), rest::binary>> = section_3
-    <<stream_dependence_flag::1, url_flag::1, ocr_stream_flag::1, _stream_priority::5>> = flags
+  defp parse_es_descriptor_header(
+         <<_elementary_stream_id::16, stream_dependence_flag::1, url_flag::1, ocr_stream_flag::1,
+           _stream_priority::5, rest::binary>>
+       ) do
+    with {:ok, rest} <- skip(rest, if(stream_dependence_flag != 0, do: 2, else: 0)),
+         {:ok, rest} <- skip_url(rest, url_flag),
+         {:ok, rest} <- skip(rest, if(ocr_stream_flag != 0, do: 2, else: 0)) do
+      {:ok, rest}
+    end
+  end
 
-    rest =
-      rest
-      |> Bunch.then_if(stream_dependence_flag != 0, fn binary ->
-        <<_depends_on_es_id::16, rest::binary>> = binary
-        rest
-      end)
-      |> Bunch.then_if(url_flag != 0, fn binary ->
-        <<url_length::8, rest::binary>> = binary
-        <<_url::binary-size(^url_length), rest::binary>> = rest
-        rest
-      end)
-      |> Bunch.then_if(ocr_stream_flag != 0, fn binary ->
-        <<_ocr_es_id::16, rest::binary>> = binary
-        rest
-      end)
+  defp parse_es_descriptor_header(_too_short), do: {:error, :invalid_esds}
 
-    {section_4, esds_section_6} = unpack_esds_section(rest, 4)
-    {<<2>>, <<>>} = unpack_esds_section(esds_section_6, 6)
+  defp skip(binary, size) do
+    case binary do
+      <<_skipped::binary-size(^size), rest::binary>> -> {:ok, rest}
+      _too_short -> {:error, :invalid_esds}
+    end
+  end
 
+  defp skip_url(binary, 0), do: {:ok, binary}
+  defp skip_url(<<url_length::8, rest::binary>>, _url_flag), do: skip(rest, url_length)
+  defp skip_url(_too_short, _url_flag), do: {:error, :invalid_esds}
+
+  defp parse_decoder_config_descriptor(section_4) do
     # 64 = mpeg4-audio
     object_type_id = 64
     # 5 = audio
@@ -76,26 +95,30 @@ defmodule Membrane.AAC.Parser.Esds do
     # it be set to 1. Some encoders leave it cleared (emitting 0x14 instead of
     # 0x15), so we accept either value rather than crashing on otherwise-valid
     # streams.
-    <<^object_type_id, ^stream_type::6, ^upstream_flag::1, _reserved_flag::1, _buffer_size::24,
-      _max_bit_rate::32, _avg_bit_rate::32, esds_section_5::binary>> = section_4
+    case section_4 do
+      <<^object_type_id, ^stream_type::6, ^upstream_flag::1, _reserved_flag::1, _buffer_size::24,
+        _max_bit_rate::32, _avg_bit_rate::32, esds_section_5::binary>> ->
+        {:ok, esds_section_5}
 
-    {section_5, <<>>} = unpack_esds_section(esds_section_5, 5)
-
-    AudioSpecificConfig.parse_audio_specific_config(section_5)
-    |> Map.put(:config, {:esds, esds})
+      _unexpected_descriptor ->
+        {:error, :invalid_esds}
+    end
   end
 
   defp unpack_esds_section(section, section_no) do
     type_tag = <<128, 128, 128>>
 
     case section do
-      <<^section_no::8-integer, ^type_tag::binary-size(3), payload_size::8-integer, rest::binary>> ->
-        <<payload::binary-size(^payload_size), rest::binary>> = rest
-        {payload, rest}
+      <<^section_no::8-integer, ^type_tag::binary-size(3), payload_size::8-integer,
+        payload::binary-size(payload_size), rest::binary>> ->
+        {:ok, payload, rest}
 
-      <<^section_no::8-integer, payload_size::8-integer, rest::binary>> ->
-        <<payload::binary-size(^payload_size), rest::binary>> = rest
-        {payload, rest}
+      <<^section_no::8-integer, payload_size::8-integer, payload::binary-size(payload_size),
+        rest::binary>> ->
+        {:ok, payload, rest}
+
+      _unexpected_section ->
+        {:error, :invalid_esds}
     end
   end
 end

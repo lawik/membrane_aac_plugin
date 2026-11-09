@@ -137,6 +137,13 @@ defmodule Membrane.AAC.Parser do
         end
       end)
       |> Config.parse_config()
+      |> case do
+        {:ok, stream_format} ->
+          stream_format
+
+        {:error, reason} ->
+          raise "Could not parse the AAC config of the stream format due to #{inspect(reason)}"
+      end
 
     if stream_format.encapsulation == :none and
          (stream_format.profile == nil or stream_format.channels == nil or

@@ -23,32 +23,61 @@ defmodule Membrane.AAC.Parser.AudioSpecificConfig do
       depends_on_core_coder::1, extension_flag::1>>
   end
 
-  @spec parse_audio_specific_config(binary()) :: AAC.t()
+  @doc """
+  Parses the Audio Specific Config, returning an error if it is malformed or
+  describes a stream that is not supported.
+  """
+  @spec parse_audio_specific_config(binary()) :: {:ok, AAC.t()} | {:error, reason :: term()}
   def parse_audio_specific_config(audio_specific_config) do
-    <<profile::5, frequency_id::4, audio_specific_config_rest::bitstring>> = audio_specific_config
+    with {:ok, aot, frequency_id, rest} <- parse_header(audio_specific_config),
+         {:ok, sample_rate, rest} <- parse_sample_rate(frequency_id, rest),
+         {:ok, channel_config_id, frame_length_id} <- parse_channels_and_frame_length(rest),
+         {:ok, profile} <- lookup(&AAC.aot_id_to_profile/1, aot, :audio_object_type),
+         {:ok, channels} <-
+           lookup(&AAC.channel_config_id_to_channels/1, channel_config_id, :channel_config) do
+      {:ok,
+       %AAC{
+         profile: profile,
+         mpeg_version: 4,
+         sample_rate: sample_rate,
+         channels:
+           case channels do
+             :AOT_specific -> nil
+             channels -> channels
+           end,
+         encapsulation: :none,
+         samples_per_frame: AAC.frame_length_id_to_samples_per_frame(frame_length_id),
+         config: {:audio_specific_config, audio_specific_config}
+       }}
+    end
+  end
 
-    custom_frequency_length = if frequency_id == 15, do: 24, else: 0
+  defp parse_header(<<aot::5, frequency_id::4, rest::bitstring>>),
+    do: {:ok, aot, frequency_id, rest}
 
-    <<custom_frequency::integer-size(^custom_frequency_length), channel_config_id::4,
-      frame_length_id::1, _rest::bits>> = audio_specific_config_rest
+  defp parse_header(_too_short), do: {:error, :invalid_audio_specific_config}
 
-    sample_rate =
-      if frequency_id == 15,
-        do: custom_frequency,
-        else: AAC.sampling_frequency_id_to_sample_rate(frequency_id)
+  defp parse_sample_rate(15, <<custom_frequency::24, rest::bitstring>>),
+    do: {:ok, custom_frequency, rest}
 
-    %AAC{
-      profile: AAC.aot_id_to_profile(profile),
-      mpeg_version: 4,
-      sample_rate: sample_rate,
-      channels:
-        case AAC.channel_config_id_to_channels(channel_config_id) do
-          :AOT_specific -> nil
-          channels -> channels
-        end,
-      encapsulation: :none,
-      samples_per_frame: AAC.frame_length_id_to_samples_per_frame(frame_length_id),
-      config: {:audio_specific_config, audio_specific_config}
-    }
+  defp parse_sample_rate(15, _too_short), do: {:error, :invalid_audio_specific_config}
+
+  defp parse_sample_rate(frequency_id, rest) do
+    with {:ok, sample_rate} <-
+           lookup(&AAC.sampling_frequency_id_to_sample_rate/1, frequency_id, :sampling_frequency) do
+      {:ok, sample_rate, rest}
+    end
+  end
+
+  defp parse_channels_and_frame_length(<<channel_config_id::4, frame_length_id::1, _rest::bits>>),
+    do: {:ok, channel_config_id, frame_length_id}
+
+  defp parse_channels_and_frame_length(_too_short), do: {:error, :invalid_audio_specific_config}
+
+  # The `Membrane.AAC` lookups raise on ids that are reserved or not supported
+  defp lookup(fun, id, name) do
+    {:ok, fun.(id)}
+  rescue
+    ArgumentError -> {:error, {:unsupported, name, id}}
   end
 end

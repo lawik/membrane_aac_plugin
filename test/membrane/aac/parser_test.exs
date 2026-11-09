@@ -164,6 +164,22 @@ defmodule Membrane.AAC.ParserTest do
              output_stream_format
   end
 
+  test "a malformed audio specific config raises a descriptive error" do
+    {_actions, state} = Parser.handle_init(nil, %Parser{out_encapsulation: :none})
+
+    for config <- [
+          {:audio_specific_config, <<0x12>>},
+          {:audio_specific_config, <<23::5, 4::4, 2::4, 0::3>>},
+          {:esds, <<3, 128, 128, 128, 2, 0, 1>>}
+        ] do
+      input_stream_format = %AAC{config: config}
+
+      assert_raise RuntimeError, ~r/Could not parse the AAC config/, fn ->
+        Parser.handle_stream_format(:input, input_stream_format, nil, state)
+      end
+    end
+  end
+
   test "the output stream format is the same as input when converting between configs" do
     perform_conversion_test(:esds, :audio_specific_config)
     perform_conversion_test(:audio_specific_config, :esds)
